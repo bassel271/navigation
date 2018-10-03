@@ -127,6 +127,43 @@ namespace dwa_local_planner {
       ROS_WARN("This planner has already been initialized, doing nothing.");
     }
   }
+    void DWAPlannerROS::initializeWithOdom(
+            std::string name,
+            tf::TransformListener* tf,
+            costmap_2d::Costmap2DROS* costmap_ros,
+            std::string odom_frame) {
+      if (! isInitialized()) {
+
+        ros::NodeHandle private_nh("~/" + name);
+        g_plan_pub_ = private_nh.advertise<nav_msgs::Path>("global_plan", 1);
+        l_plan_pub_ = private_nh.advertise<nav_msgs::Path>("local_plan", 1);
+        tf_ = tf;
+        costmap_ros_ = costmap_ros;
+        costmap_ros_->getRobotPose(current_pose_);
+
+        // make sure to update the costmap we'll use for this cycle
+        costmap_2d::Costmap2D* costmap = costmap_ros_->getCostmap();
+
+        planner_util_.initialize(tf, costmap, costmap_ros_->getGlobalFrameID());
+
+        //create the actual planner that we'll use.. it'll configure itself from the parameter server
+        dp_ = boost::shared_ptr<DWAPlanner>(new DWAPlanner(name, &planner_util_));
+
+        if( private_nh.getParam( "odom_topic", odom_topic_ ))
+        {
+          odom_helper_.setOdomTopic( odom_topic_ );
+        }
+
+        initialized_ = true;
+
+        dsrv_ = new dynamic_reconfigure::Server<DWAPlannerConfig>(private_nh);
+        dynamic_reconfigure::Server<DWAPlannerConfig>::CallbackType cb = boost::bind(&DWAPlannerROS::reconfigureCB, this, _1, _2);
+        dsrv_->setCallback(cb);
+      }
+      else{
+        ROS_WARN("This planner has already been initialized, doing nothing.");
+      }
+    }
   
   bool DWAPlannerROS::setPlan(const std::vector<geometry_msgs::PoseStamped>& orig_global_plan) {
     if (! isInitialized()) {

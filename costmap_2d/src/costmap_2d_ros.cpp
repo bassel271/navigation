@@ -181,6 +181,130 @@ Costmap2DROS::Costmap2DROS(std::string name, tf::TransformListener& tf) :
   dsrv_->setCallback(cb);
 }
 
+Costmap2DROS::Costmap2DROS(std::string name, tf::TransformListener& tf, std::string robot_name) :
+            layered_costmap_(NULL),
+            name_(name),
+            tf_(tf),
+            transform_tolerance_(0.3),
+            map_update_thread_shutdown_(false),
+            stop_updates_(false),
+            initialized_(true),
+            stopped_(false),
+            robot_stopped_(false),
+            map_update_thread_(NULL),
+            last_publish_(0),
+            plugin_loader_("costmap_2d", "costmap_2d::Layer"),
+            publisher_(NULL),
+            dsrv_(NULL),
+            footprint_padding_(0.0)
+{
+  // Initialize old pose with something
+  old_pose_.setIdentity();
+  old_pose_.setOrigin(tf::Vector3(1e30, 1e30, 1e30));
+
+  ros::NodeHandle private_nh("~/" + name);
+  ros::NodeHandle g_nh;
+
+  // get our tf prefix
+  ros::NodeHandle prefix_nh;
+  std::string tf_prefix = tf::getPrefixParam(prefix_nh);
+
+  // get two frames
+  private_nh.param("global_frame", global_frame_, std::string("/map"));
+  private_nh.param("robot_base_frame", robot_base_frame_, std::string("base_link"));
+
+  robot_base_frame_ = robot_name + "/" + robot_base_frame_;
+  // make sure that we set the frames appropriately based on the tf_prefix
+  global_frame_ = tf::resolve(tf_prefix, global_frame_);
+  robot_base_frame_ = tf::resolve(tf_prefix, robot_base_frame_);
+
+  ros::Time last_error = ros::Time::now();
+  std::string tf_error;
+  // we need to make sure that the transform between the robot base frame and the global frame is available
+  while (ros::ok()
+         && !tf_.waitForTransform(global_frame_, robot_base_frame_, ros::Time(), ros::Duration(0.1), ros::Duration(0.01),
+                                  &tf_error))
+  {
+    ros::spinOnce();
+    if (last_error + ros::Duration(5.0) < ros::Time::now())
+    {
+      ROS_WARN("Timed out waiting for transform from %s to %s to become available before running costmap, tf error: %s",
+               robot_base_frame_.c_str(), global_frame_.c_str(), tf_error.c_str());
+      last_error = ros::Time::now();
+    }
+    // The error string will accumulate and errors will typically be the same, so the last
+    // will do for the warning above. Reset the string here to avoid accumulation.
+    tf_error.clear();
+  }
+
+  // check if we want a rolling window version of the costmap
+  bool rolling_window, track_unknown_space, always_send_full_costmap;
+  private_nh.param("rolling_window", rolling_window, false);
+  private_nh.param("track_unknown_space", track_unknown_space, false);
+  private_nh.param("always_send_full_costmap", always_send_full_costmap, false);
+
+  layered_costmap_ = new LayeredCostmap(global_frame_, rolling_window, track_unknown_space);
+
+  if (!private_nh.hasParam("plugins"))
+  {
+    resetOldParameters(private_nh);
+  }
+
+  if (private_nh.hasParam("plugins"))
+  {
+    XmlRpc::XmlRpcValue my_list;
+    private_nh.getParam("plugins", my_list);
+    for (int32_t i = 0; i < my_list.size(); ++i)
+    {
+      std::string pname = static_cast<std::string>(my_list[i]["name"]);
+      std::string type = static_cast<std::string>(my_list[i]["type"]);
+      ROS_INFO("Using plugin \"%s\"", pname.c_str());
+
+      boost::shared_ptr<Layer> plugin = plugin_loader_.createInstance(type);
+      layered_costmap_->addPlugin(plugin);
+      plugin->initialize(layered_costmap_, robot_name + "/" + name + "/" + pname, &tf_);
+    }
+  }
+
+  // subscribe to the footprint topic
+  std::string topic_param, topic;
+  if (!private_nh.searchParam("footprint_topic", topic_param))
+  {
+    topic_param = "footprint_topic";
+  }
+
+  private_nh.param(topic_param, topic, std::string("footprint"));
+  footprint_sub_ = private_nh.subscribe(robot_name + "/" + topic, 1, &Costmap2DROS::setUnpaddedRobotFootprintPolygon, this);
+
+  if (!private_nh.searchParam("published_footprint_topic", topic_param))
+  {
+    topic_param = "published_footprint";
+  }
+
+  private_nh.param(topic_param, topic, std::string("oriented_footprint"));
+  footprint_pub_ = private_nh.advertise<geometry_msgs::PolygonStamped>("footprint", 1);
+
+  setUnpaddedRobotFootprint(makeFootprintFromParams(private_nh));
+
+  publisher_ = new Costmap2DPublisher(&private_nh, layered_costmap_->getCostmap(), global_frame_, robot_name + "/" + "costmap",
+                                      always_send_full_costmap);
+
+  // create a thread to handle updating the map
+  stop_updates_ = false;
+  initialized_ = true;
+  stopped_ = false;
+
+  // Create a time r to check if the robot is moving
+  robot_stopped_ = false;
+  timer_ = private_nh.createTimer(ros::Duration(.1), &Costmap2DROS::movementCB, this);
+
+  dsrv_ = new dynamic_reconfigure::Server<Costmap2DConfig>(ros::NodeHandle("~/" + name));
+  dynamic_reconfigure::Server<Costmap2DConfig>::CallbackType cb = boost::bind(&Costmap2DROS::reconfigureCB, this, _1,
+                                                                              _2);
+  dsrv_->setCallback(cb);
+}
+
+
 void Costmap2DROS::setUnpaddedRobotFootprintPolygon(const geometry_msgs::Polygon& footprint)
 {
   setUnpaddedRobotFootprint(toPointVector(footprint));

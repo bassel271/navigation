@@ -78,6 +78,7 @@ public:
    * @param tf A reference to a TransformListener
    */
   Costmap2DROS(std::string name, tf::TransformListener& tf);
+  Costmap2DROS(std::string name, tf::TransformListener& tf, std::string robot_name);
   ~Costmap2DROS();
 
   /**

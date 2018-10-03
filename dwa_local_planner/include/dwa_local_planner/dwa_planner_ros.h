@@ -79,6 +79,8 @@ namespace dwa_local_planner {
       void initialize(std::string name, tf::TransformListener* tf,
           costmap_2d::Costmap2DROS* costmap_ros);
 
+      void initializeWithOdom(std::string name, tf::TransformListener* tf,
+                      costmap_2d::Costmap2DROS* costmap_ros, std::string odom_frame);
       /**
        * @brief  Destructor for the wrapper
        */
